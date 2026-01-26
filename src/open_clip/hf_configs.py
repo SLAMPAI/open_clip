@@ -64,4 +64,13 @@ arch_dict = {
         },
         "pooler": "cls_pooler",
     },
+    "whisper": {
+        "config_names": {
+            "vocab_size": "vocab_size",
+            "width": "d_model",
+            "heads": "encoder_attention_heads",
+            "layers": "encoder_layers",
+        },
+        "pooler": "mean_pooler",
+    }
 }

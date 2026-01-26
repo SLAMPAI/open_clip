@@ -19,6 +19,7 @@ from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler, IterableD
 from torch.utils.data.distributed import DistributedSampler
 from webdataset.filters import _shuffle
 from webdataset.tariterators import base_plus_ext, url_opener, tar_file_expander, valid_sample
+from transformers.models.whisper.feature_extraction_whisper import WhisperFeatureExtractor
 
 try:
     import horovod.torch as hvd
@@ -115,6 +116,20 @@ except ImportError:
 # initizlied the audioset map
 _AUDIOSET_MAP_PATH = os.path.join(Path(__file__).parent, "audioset_textmap.npy")
 _AUDIOSET_MAP = np.load(_AUDIOSET_MAP_PATH, allow_pickle=True)
+
+
+def get_whisper_audio_features(waveform, feature_extractor):
+    # waveform: (T,)
+    # return: (num_frames, feature_dim)
+    # feature_extractor: WhisperFeatureExtractor
+    # normalize waveform to -1 to 1
+    waveform = waveform / torch.abs(waveform).max()
+    inputs = feature_extractor(
+        waveform.numpy(),
+        sampling_rate=feature_extractor.sampling_rate,
+        return_tensors="pt"
+    )
+    return inputs.input_features[0]  # (num_frames, feature_dim)
 
 
 def int16_to_float32(x):
@@ -415,7 +430,7 @@ def get_mel(audio_data, audio_cfg):
     return mel.T  # (T, n_mels)
 
 
-def get_audio_features(sample, audio_data, max_len, data_truncating, data_filling, audio_cfg, require_grad=False):
+def get_audio_features(sample, audio_data, max_len, data_truncating, data_filling, audio_cfg, require_grad=False, feature_extractor=None):
     """
     Calculate and add audio features to sample.
     Sample: a dict containing all the data of current sample.
@@ -545,6 +560,13 @@ def get_audio_features(sample, audio_data, max_len, data_truncating, data_fillin
 #         )
 #     return texts
 
+def resample_if_needed(waveform: torch.Tensor, sr: int, target_sr: int = 48000):
+    # waveform shape is typically (channels, time)
+    if sr == target_sr:
+        return waveform, sr
+    resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sr)
+    return resampler(waveform), target_sr
+
 
 def preprocess_single(
         sample,
@@ -555,13 +577,15 @@ def preprocess_single(
         class_index_dict,
         data_filling,
         data_truncating,
-        tokenizer
+        tokenizer,
+        feature_extractor=None
 ):
     """
     Preprocess a single sample for wdsdataloader.
     """
     audio_data, orig_sr = sample[audio_ext]
     audio_data = int16_to_float32_torch(float32_to_int16_torch(audio_data[0]))
+    audio_data, orig_sr = resample_if_needed(audio_data, orig_sr, target_sr=audio_cfg.get('sample_rate', 48000))
 
     sample = get_audio_features(
             sample, 
@@ -569,7 +593,8 @@ def preprocess_single(
             max_len=max_len, 
             data_truncating=data_truncating, 
             data_filling=data_filling, 
-            audio_cfg=audio_cfg
+            audio_cfg=audio_cfg,
+            feature_extractor=feature_extractor
         )
     del sample[audio_ext]
 
@@ -627,11 +652,15 @@ def collate_fn_with_preprocess(batch,
 
     # concatenate values in each dictionary. if it is a tensor, concatenate. if it is a list, extend.
     data_preprocessed = []
+    # if audio_cfg.get("model_type", "default") == "whisper":
+    #     feature_extractor = WhisperFeatureExtractor.from_pretrained(audio_cfg['model_name'])
+    # else:
+    feature_extractor = None
 
     for sample in batch:
         data_preprocessed.append(
             preprocess_single(sample, audio_ext, text_ext, max_len, audio_cfg, class_index_dict, data_filling,
-                              data_truncating, tokenizer))
+                              data_truncating, tokenizer, feature_extractor=feature_extractor))
 
     batch_dict = {}
     for k in data_preprocessed[0].keys():
@@ -652,6 +681,7 @@ def collate_fn_with_preprocess(batch,
     return batch_dict
 
 
+
 def get_audio_wds_dataset(
         args,
         preprocess_fns,
@@ -668,8 +698,6 @@ def get_audio_wds_dataset(
     Get a dataset for wdsdataloader.
     """
     args.class_index_dict = load_class_label(args.class_label_path)
-    # if is_local is None and (not args.remotedata is None):
-    #     is_local = not args.remotedata
     model_cfg = args.model_cfg
     input_shards = args.train_data if is_train else args.val_data
     assert input_shards is not None
@@ -690,6 +718,7 @@ def get_audio_wds_dataset(
             input_shards, sizefilepath_=sizefilepath_
         )
 
+
     # logging.info(num_samples, num_shards, input_shards)
     # logging.info("sizefilepath_", sizefilepath_)
 
@@ -709,7 +738,7 @@ def get_audio_wds_dataset(
     pipeline = [wds.SimpleShardList(input_shards)]
     # at this point we have an iterator over all the shards
     # TODO: (yusong): add a if statement of distributed. If not, we don't need to split_by_node
-    if is_train or args.parallel_eval:
+    if is_train:
         pipeline.extend(
             [
                 detshuffle2(
@@ -746,7 +775,7 @@ def get_audio_wds_dataset(
     pipeline.append(
         wds.batched(
             args.batch_size,
-            partial=not (is_train or args.parallel_eval),
+            partial=not is_train,
             collation_fn=partial(collate_fn_with_preprocess,
                                  audio_ext=audio_ext,
                                  text_ext=text_ext,
@@ -760,71 +789,7 @@ def get_audio_wds_dataset(
     )
 
     dataset = wds.DataPipeline(*pipeline)
-    # if is_train or args.parallel_eval:
-    #     # (yusong): Currently parallel evaluation will be not precise as we are repeat the last few samples.
-    #     # (yusong): See comments below.
-    #     # roll over and repeat a few samples to get same number of full batches on each node
-    #     global_batch_size = args.batch_size * args.world_size
-    #     num_batches = math.ceil(num_samples / global_batch_size)
-    #     num_workers = max(1, args.workers)
-    #     num_worker_batches = math.ceil(
-    #         num_batches / num_workers
-    #     )  # per dataloader worker
-    #     num_batches = num_worker_batches * num_workers
-    #     num_samples = num_batches * global_batch_size
-    #     print("num samples", num_samples)
-    #     print("num_batches", num_batches)
-    #     print("num_worker_batches", num_worker_batches)
-    #     print("global_batch_size", global_batch_size)
-    #     print("rgs.world_size", args.world_size)
-    #     dataset = dataset.with_epoch(
-    #         num_worker_batches
-    #     )  # each worker is iterating over this
-    # else:
-    #     # last batches are partial, eval is done on single (master) node
-    #     num_batches = math.ceil(num_samples / args.batch_size)
-
-    # kwargs = {}
-    # if args.horovod:  # multi-node training on summit
-    #     kwargs["multiprocessing_context"] = "forkserver"
-
-    # if is_train:
-    #     # if args.prefetch_factor:
-    #     #     prefetch_factor = args.prefetch_factor
-    #     # else:
-    #     prefetch_factor = max(2, args.batch_size // args.workers)
-    # else:
-    #     prefetch_factor = 2
-
-    # dataloader = wds.WebLoader(
-    #     dataset,
-    #     batch_size=None,
-    #     shuffle=False,
-    #     num_workers=args.workers,
-    #     pin_memory=True,
-    #     prefetch_factor=prefetch_factor,
-    #     **kwargs
-    # )
-
-    # # FIXME not clear which approach is better, with_epoch before vs after dataloader?
-    # # hoping to resolve via https://github.com/webdataset/webdataset/issues/169
-    # # if is_train:
-    # #     # roll over and repeat a few samples to get same number of full batches on each node
-    # #     global_batch_size = args.batch_size * args.world_size
-    # #     num_batches = math.ceil(num_samples / global_batch_size)
-    # #     num_workers = max(1, args.workers)
-    # #     num_batches = math.ceil(num_batches / num_workers) * num_workers
-    # #     num_samples = num_batches * global_batch_size
-    # #     dataloader = dataloader.with_epoch(num_batches)
-    # # else:
-    # #     # last batches are partial, eval is done on single (master) node
-    # #     num_batches = math.ceil(num_samples / args.batch_size)
-
-    # # add meta-data to dataloader instance for convenience
-    # dataloader.num_batches = num_batches
-    # dataloader.num_samples = num_samples
-
-    # return DataInfo(dataloader, shared_epoch=shared_epoch)
+   
 
     if is_train:
         # if not resampled:
@@ -849,6 +814,8 @@ def get_audio_wds_dataset(
         shuffle=False,
         num_workers=args.workers,
         persistent_workers=args.workers > 0,
+        pin_memory=True,
+        prefetch_factor=2,
     )
 
     dataloader.num_batches = num_batches
@@ -1174,7 +1141,7 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
         # Eval will just exhaust the iterator if the size is not specified.
         num_samples = args.val_num_samples or 0 
 
-    shared_epoch = SharedEpoch(epoch=epoch)  # create a shared epoch store to sync epoch to dataloader worker proc
+#     shared_epoch = SharedEpoch(epoch=epoch)  # create a shared epoch store to sync epoch to dataloader worker proc
 
     if is_train and args.train_data_upsampling_factors is not None:
         assert resampled, "--train_data_upsampling_factors is only supported when sampling with replacement (with --dataset-resampled)."
@@ -1269,6 +1236,8 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
     # add meta-data to dataloader instance for convenience
     dataloader.num_batches = num_batches
     dataloader.num_samples = num_samples
+
+    shared_epoch = SharedEpoch(epoch=epoch)
 
     return DataInfo(dataloader=dataloader, shared_epoch=shared_epoch)
 
@@ -1381,15 +1350,23 @@ def get_data(args, preprocess_fns, epoch=0, tokenizer=None):
     data = {}
 
     if args.datasetpath and args.datasetnames and args.datasetinfos:
-        args.train_data = get_tar_path_from_dataset_name(
+        data_shards = get_tar_path_from_dataset_name(
             args.datasetnames,
             args.datasetinfos,
             proportion=args.dataset_proportion,
             dataset_path=args.datasetpath,
             full_dataset=args.full_train_dataset,
         )
+        for dataset_info in args.datasetinfos:
+            print(f"Setting {dataset_info} data shards.")
+            if dataset_info in ["train"]:
+                args.train_data = data_shards
+            elif dataset_info in ["val", "test", "valid"]:
+                args.val_data = data_shards
+            else:
+                logging.warning(f"Unknown dataset info: {dataset_info}")
     
-
+    print(args.val_data)
     if args.train_data or args.dataset_type == "synthetic":
         data["train"] = get_dataset_fn(args.train_data, args.dataset_type)(
             args, preprocess_train, is_train=True, epoch=epoch, tokenizer=tokenizer)
@@ -1404,4 +1381,5 @@ def get_data(args, preprocess_fns, epoch=0, tokenizer=None):
     if args.imagenet_v2 is not None:
         data["imagenet-v2"] = get_imagenet(args, preprocess_fns, "v2")
 
+    print(f"Datasets loaded: {list(data.keys())}")
     return data

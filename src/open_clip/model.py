@@ -5,7 +5,7 @@ Adapted from https://github.com/openai/CLIP. Originally MIT License, Copyright (
 import copy
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
@@ -22,6 +22,7 @@ from .transformer import LayerNormFp32, LayerNorm, QuickGELU, Attention, VisionT
     text_global_pool
 from .utils import to_2tuple
 from .htsat import create_htsat_model
+from .whisper import create_whisper_model, WhisperAsHTSAT
 
 
 @dataclass
@@ -38,6 +39,10 @@ class CLIPAudioCfg:
     class_num: int = 527
     mel_bins: int = 64
     clip_samples: int = 480000
+
+    pretrained: Optional[bool] = False
+    pooler_type: Optional[str] = None
+    proj_type: Optional[str] = None
 
 
 @dataclass
@@ -135,6 +140,21 @@ def _build_audio_tower(
 
     if audio_cfg.model_type == "HTSAT":
         audio_tower = create_htsat_model(audio_cfg)
+    elif audio_cfg.model_type == "whisper":
+        # audio_tower = HFWhisperEncoder(
+        #     audio_cfg.model_name,
+        #     output_dim=embed_dim,
+        #     pretrained=audio_cfg.pretrained,
+        #     pooler_type=audio_cfg.pooler_type,
+        #     proj_type=audio_cfg.proj_type,
+        #     audio_cfg=asdict(audio_cfg)
+        # )
+        whisper_core = create_whisper_model(audio_cfg, embed_dim)
+        audio_tower = WhisperAsHTSAT(
+            whisper_encoder=whisper_core,
+            fine_grained_upsample=2,
+            return_logits=False,   # set True + num_classes if you want HTSAT-like sigmoid outputs
+        )
     else:
         raise f"Unknown model type: {audio_cfg.model_type}!"
 
@@ -283,6 +303,7 @@ class CLAP(nn.Module):
         text_cfg["audio"] = True
 
         self.audio = _build_audio_tower(embed_dim, audio_cfg, quick_gelu, cast_dtype)
+        print(self.audio)
         self.visual = self.audio
         text = _build_text_tower(embed_dim, text_cfg, quick_gelu, cast_dtype, audio=True)
         self.text = text
@@ -308,13 +329,26 @@ class CLAP(nn.Module):
         else:
             self.logit_bias = None
 
-        joint_embed_shape = embed_dim
+        self.joint_embed_shape = embed_dim
 
         self.audio_projection = nn.Sequential(
-                nn.Linear(embed_dim, joint_embed_shape),
+                nn.Linear(embed_dim, self.joint_embed_shape),
                 mlp_act_layer,
-                nn.Linear(joint_embed_shape, joint_embed_shape)
+                nn.Linear(self.joint_embed_shape, self.joint_embed_shape)
             )
+
+        self.logit_scale_a = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        self.logit_scale_t = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        self.register_buffer("attn_mask", self.build_attention_mask(), persistent=False)
+
+    def build_attention_mask(self):
+        # lazily create causal attention mask, with full attention between the vision tokens
+        # pytorch uses additive attention mask; fill with -inf
+        mask = torch.empty(self.context_length, self.context_length)
+        mask.fill_(float("-inf"))
+        mask.triu_(1)  # zero out the lower diagonal
+        return mask
+
 
     def lock_audio_tower(self, unlocked_groups=0, freeze_bn_stats=False):
         # lock image tower as per LiT - https://arxiv.org/abs/2111.07991
@@ -374,20 +408,21 @@ class CLAP(nn.Module):
 
         if audio is not None:
             audio_features = self.audio_projection(audio_features)
-
+            audio_features = F.normalize(audio_features, dim=-1)
+            
         if self.output_dict:
             out_dict = {
                 "audio_features": audio_features,
                 "text_features": text_features,
-                "logit_scale": self.logit_scale.exp()
+                "logit_scale": (self.logit_scale_a.exp(), self.logit_scale_t.exp())
             }
             if self.logit_bias is not None:
                 out_dict['logit_bias'] = self.logit_bias
             return out_dict
 
         if self.logit_bias is not None:
-            return audio_features, text_features, self.logit_scale.exp(), self.logit_bias
-        return audio_features, text_features, self.logit_scale.exp()
+            return audio_features, text_features, (self.logit_scale_a.exp(), self.logit_scale_t.exp()), self.logit_bias
+        return audio_features, text_features, (self.logit_scale_a.exp(), self.logit_scale_t.exp())
 
 class CLIP(nn.Module):
     output_dict: torch.jit.Final[bool]

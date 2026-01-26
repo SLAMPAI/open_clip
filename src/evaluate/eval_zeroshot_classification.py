@@ -44,7 +44,7 @@ def evaluate_zeroshot(model, data, start_epoch, args, writer, tokenizer):
             # audios = batch  # contains mel_spec, wavform, and longer list
             # audios = audios.cuda()
             audio_features, _, _ = model(audios, None)
-            audio_features = F.normalize(audio_features, dim=-1)
+            # audio_features = F.normalize(audio_features, dim=-1)
             all_audio_features.append(audio_features.detach().cpu())
             all_class_labels.append(torch.argmax(batch["class_label"], 1).long())
         all_audio_features = torch.cat(all_audio_features, dim=0)
@@ -68,14 +68,21 @@ def evaluate_zeroshot(model, data, start_epoch, args, writer, tokenizer):
 
         all_texts = all_texts.cuda()
         _, all_text_features, _ = model(None, all_texts)
-        all_text_features = F.normalize(all_text_features, dim=-1).detach().cpu()
+        # all_text_features = F.normalize(all_text_features, dim=-1)
+        all_text_features = all_text_features.detach().cpu()
 
         # compute similarity
         _, _, logit_scale = model(None, None)
-        logit_scale = logit_scale.cpu()
+        if isinstance(logit_scale, tuple):
+            logit_scale_a, logit_scale_t = logit_scale
+            logit_scale_a = logit_scale_a.exp().detach().cpu()
+            logit_scale_t = logit_scale_t.exp().detach().cpu()
+        else:
+            logit_scale_a = logit_scale_t = logit_scale.exp().detach().cpu()
+        # logit_scale = logit_scale.cpu()
 
-        logits_per_audio = (logit_scale * all_audio_features @ all_text_features.t()).detach().cpu()
-        logits_per_text = logits_per_audio.t().detach().cpu()
+        logits_per_audio = (all_audio_features @ all_text_features.t()).detach().cpu()
+        logits_per_text = (all_text_features @ all_audio_features.t()).detach().cpu()
 
         ground_truth = all_class_labels.view(-1, 1)
         logit = logits_per_audio

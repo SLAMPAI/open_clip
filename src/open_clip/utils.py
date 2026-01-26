@@ -92,6 +92,7 @@ def get_tar_path_from_dataset_name(
             tmp = []
     
             sizefilepath_ = f"{dataset_path}/{n}/{s}/sizes.json"
+            print(f"Looking for size file at: {sizefilepath_}")
             if not os.path.exists(sizefilepath_):
                 sizefilepath_ = f"./json_files/{n}/{s}/sizes.json"
      

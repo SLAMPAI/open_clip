@@ -235,7 +235,14 @@ class ClapLoss(nn.Module):
         self.prev_num_logits = 0
         self.labels = {}
 
-    def forward(self, audio_features, text_features, logit_scale, audio_features_mlp=None, text_features_mlp=None, output_dict=False):
+    def forward(
+        self, 
+        audio_features, 
+        text_features, 
+        logit_scale, audio_features_mlp=None, text_features_mlp=None, output_dict=False
+    ):
+
+        logit_scale_a, logit_scale_t = logit_scale
         device = audio_features.device
         if self.mlp_loss:
             if self.world_size > 1:
@@ -247,20 +254,20 @@ class ClapLoss(nn.Module):
                     mlp_loss=self.mlp_loss
                 )
                 if self.local_loss:
-                    a_logits_per_audio = logit_scale * audio_features @ all_text_features_mlp.T
-                    a_logits_per_text = logit_scale * text_features_mlp @ all_audio_features.T
-                    t_logits_per_audio = logit_scale * audio_features_mlp @ all_text_features.T
-                    t_logits_per_text = logit_scale * text_features @ all_audio_features_mlp.T
+                    a_logits_per_audio = logit_scale_a * audio_features @ all_text_features_mlp.T
+                    a_logits_per_text = logit_scale_a * text_features_mlp @ all_audio_features.T
+                    t_logits_per_audio = logit_scale_t * audio_features_mlp @ all_text_features.T
+                    t_logits_per_text = logit_scale_t * text_features @ all_audio_features_mlp.T
                 else:
-                    a_logits_per_audio = logit_scale * all_audio_features @ all_text_features_mlp.T
+                    a_logits_per_audio = logit_scale_a * all_audio_features @ all_text_features_mlp.T
                     a_logits_per_text = a_logits_per_audio.T
-                    t_logits_per_audio = logit_scale * all_audio_features_mlp @ all_text_features.T
+                    t_logits_per_audio = logit_scale_t * all_audio_features_mlp @ all_text_features.T
                     t_logits_per_text = t_logits_per_audio.T
             else:
-                a_logits_per_audio = logit_scale * audio_features @ text_features_mlp.T
-                a_logits_per_text = logit_scale * text_features_mlp @ audio_features.T
-                t_logits_per_audio = logit_scale * audio_features_mlp @ text_features.T
-                t_logits_per_text = logit_scale * text_features @ audio_features_mlp.T
+                a_logits_per_audio = logit_scale_a * audio_features @ text_features_mlp.T
+                a_logits_per_text = logit_scale_a * text_features_mlp @ audio_features.T
+                t_logits_per_audio = logit_scale_t * audio_features_mlp @ text_features.T
+                t_logits_per_text = logit_scale_t * text_features @ audio_features_mlp.T
 
             # calculated ground-truth and cache if enabled
             num_logits = a_logits_per_audio.shape[0]
@@ -302,14 +309,14 @@ class ClapLoss(nn.Module):
                 )
 
                 if self.local_loss:
-                    logits_per_audio = logit_scale * audio_features @ all_text_features.T
-                    logits_per_text = logit_scale * text_features @ all_audio_features.T
+                    logits_per_audio = logit_scale_a * audio_features @ all_text_features.T
+                    logits_per_text = logit_scale_a * text_features @ all_audio_features.T
                 else:
-                    logits_per_audio = logit_scale * all_audio_features @ all_text_features.T
+                    logits_per_audio = logit_scale_a * all_audio_features @ all_text_features.T
                     logits_per_text = logits_per_audio.T
             else:
-                logits_per_audio = logit_scale * audio_features @ text_features.T
-                logits_per_text = logit_scale * text_features @ audio_features.T
+                logits_per_audio = logit_scale_a * audio_features @ text_features.T
+                logits_per_text = logit_scale_a * text_features @ audio_features.T
 
             # calculated ground-truth and cache if enabled
             num_logits = logits_per_audio.shape[0]

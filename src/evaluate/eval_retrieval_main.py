@@ -63,7 +63,12 @@ def evaluate_zeroshot(model, data, start_epoch, args, writer, tokenizer):
 
             keys = ["waveform", "longer"]
             audios = {k:batch[k].to(device) for k in keys}
-            texts = batch['text'].cuda()
+            texts = batch['text']
+            print(texts)
+
+            texts = 
+
+            texts = tokenizer(texts).to(device)
             
 
             out = model(audios, None)
@@ -245,45 +250,9 @@ def main(args):
     args.model_cfg = model.model_cfg
     tokenizer = get_tokenizer(args.model)
 
-    data = get_data(args, (preprocess_train, preprocess_val), tokenizer=tokenizer) # (yusong): hack: no model_cfg needed to get data
-    dataloader = data["val"].dataloader
-    # for batch in dataloader:
-    #     logging.info("batch:", batch)
-    #     break
-    # return
+    data = get_data(args, (preprocess_train, preprocess_val), tokenizer=None) # (yusong): hack: no model_cfg needed to get data
+
     writer = None  # if use tensorboard, initalize writer here
-
-    # if args.wandb:
-    #     assert wandb is not None, "Please install wandb."
-
-    #     # # find the line with "wandb_notes" and get the value
-    #     # wandb_notes = find_params_value(params_file, 'wandb_notes')
-    #     # if wandb_notes is None:
-    #     #     print(f'wandb_notes not found in params file: {params_file}, set to timestamp.')
-    #     #     wandb_notes = f'experiment_{time.strftime("%Y%m%d-%H%M%S")}'
-    #     # wandb_notes = wandb_notes + '-eval-retrieval'
-    #     wandb_notes = args.wandb_notes
-
-    #     logging.debug("Starting wandb.")
-    #     args.train_sz = data["train"].dataloader.num_samples
-    #     if args.val_data is not None:
-    #         args.val_sz = data["val"].dataloader.num_samples
-    #     # you will have to configure this for your project!
-    #     if args.wandb_id is not None:
-    #         wandb.init(
-    #             project="clap",
-    #             id=args.wandb_id,
-    #             resume=True
-    #         )
-    #     else:
-    #         wandb.init(
-    #             project="clap",
-    #             notes=wandb_notes,
-    #             name=wandb_notes,
-    #             tags=[],
-    #             config=vars(args),
-    #         )
-    #     logging.debug("Finished loading wandb.")
 
     if os.path.isdir(args.pretrained):
         all_model_checkpoints = sorted(glob.glob(os.path.join(log_dir, 'checkpoints', '*.pt')), key=os.path.getmtime)
@@ -307,10 +276,12 @@ def main(args):
 
         # load model
         checkpoint = torch.load(model_path, map_location=device)
-        if "epoch" in checkpoint:
+        print(f"Loading checkpoint from {model_path}")
+        if "epoch" in model_path:
             # resuming a train checkpoint w/ epoch and optimizer state
             start_epoch = checkpoint["epoch"]
             sd = checkpoint["state_dict"]
+            logging.info("state dict:", sd.keys())
             if next(iter(sd.items()))[0].startswith(
                     "module"
             ):

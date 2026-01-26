@@ -188,13 +188,14 @@ def create_model(
     preprocess_cfg = asdict(PreprocessCfg())
     has_hf_hub_prefix = model_name.startswith(HF_HUB_PREFIX)
     cast_dtype = get_cast_dtype(precision)
+
+    print("model name:", model_name)
     
-    if model_name.startswith("HTSAT"):
+    if model_name.startswith("HTSAT") or model_name.startswith("whisper"):
         model_cfg = get_model_config(model_name)
         model = CLAP(**model_cfg, cast_dtype=cast_dtype)
         setattr(model, "model_cfg", model_cfg)
 
-        # pretrained_audio = model_kwargs.pop("pretrained_audio", None)
     elif has_hf_hub_prefix:
         model_id = model_name[len(HF_HUB_PREFIX):]
         checkpoint_path = download_pretrained_from_hf(model_id, cache_dir=cache_dir)
@@ -218,7 +219,7 @@ def create_model(
             device=device,
             cache_dir=cache_dir,
         )
-    elif not model_name.startswith("HTSAT"):
+    elif not model_name.startswith("HTSAT") and not model_name.startswith("whisper"):
         model_cfg = model_cfg or get_model_config(model_name)
         if model_cfg is not None:
             logging.info(f'Loaded {model_name} model config.')
@@ -333,28 +334,22 @@ def create_model(
             logging.info(pretrained_audio.split("/")[-1].startswith('HTSAT'))
             if pretrained_audio.split("/")[-1].startswith('HTSAT'):
                 
-                if 'HTSAT_AudioSet_Saved' in pretrained_audio:
-                    audio_ckpt = torch.load(pretrained_audio, map_location='cpu')
-                    audio_ckpt = audio_ckpt['state_dict']
-                    keys = list(audio_ckpt.keys())
-                    for key in keys:
-                        if key.startswith('sed_model') and ('spectrogram_extractor' not in key
-                                                            and 'logmel_extractor' not in key):
-                            v = audio_ckpt.pop(key)
-                            audio_ckpt['audio.' + key[10:]] = v
-                else:
-                # elif os.path.basename(pretrained_audio).startswith('HTSAT'):  # checkpoint trained via HTSAT codebase
-                    audio_ckpt = torch.load(pretrained_audio, map_location='cpu')
-                    audio_ckpt = audio_ckpt['state_dict']
-                    keys = list(audio_ckpt.keys())
-                    for key in keys:
-                        if key.startswith('sed_model'):
-                            v = audio_ckpt.pop(key)
-                            audio_ckpt['audio.' + key[10:]] = v
-                # elif os.path.basename(pretrained_audio).startswith('finetuned'):  # checkpoint trained via linear probe codebase
+                # if 'HTSAT_AudioSet_Saved' in pretrained_audio:
+                audio_ckpt = torch.load(pretrained_audio, map_location='cpu')
+                audio_ckpt = audio_ckpt['state_dict']
+                keys = list(audio_ckpt.keys())
+                for key in keys:
+                    if key.startswith('sed_model'):
+                        v = audio_ckpt.pop(key)
+                        audio_ckpt[key.replace("sed_model.", "audio.")] = v
+                # else:  # checkpoint trained via HTSAT codebase
                 #     audio_ckpt = torch.load(pretrained_audio, map_location='cpu')
-                # else:
-                #     raise ValueError('Unknown audio checkpoint')
+                #     audio_ckpt = audio_ckpt['state_dict']
+                #     keys = list(audio_ckpt.keys())
+                #     for key in keys:
+                #         if key.startswith('sed_model'):
+                #             v = audio_ckpt.pop(key)
+                #             audio_ckpt['audio_branch.' + key[10:]] = v
             else:
                 raise f'this audio encoder pretrained checkpoint is not support'
 

@@ -537,6 +537,13 @@ def parse_args(args):
         help='Use SigLip (sigmoid) loss.'
     )
 
+    parser.add_argument(
+        "--audio",
+        default=False,
+        action="store_true",
+        help='Use audio input instead of images.'
+    )
+
     args = parser.parse_args(args)
 
     # If some params are not passed, we use the default values based on model name.
