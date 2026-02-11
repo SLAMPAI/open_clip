@@ -156,7 +156,7 @@ def _build_audio_tower(
             return_logits=False,   # set True + num_classes if you want HTSAT-like sigmoid outputs
         )
     else:
-        raise f"Unknown model type: {audio_cfg.model_type}!"
+        raise ValueError(f"Unknown audio model type: {audio_cfg.model_type}!")
 
     return audio_tower
 
@@ -303,7 +303,6 @@ class CLAP(nn.Module):
         text_cfg["audio"] = True
 
         self.audio = _build_audio_tower(embed_dim, audio_cfg, quick_gelu, cast_dtype)
-        print(self.audio)
         self.visual = self.audio
         text = _build_text_tower(embed_dim, text_cfg, quick_gelu, cast_dtype, audio=True)
         self.text = text

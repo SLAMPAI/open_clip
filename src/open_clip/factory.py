@@ -189,8 +189,6 @@ def create_model(
     has_hf_hub_prefix = model_name.startswith(HF_HUB_PREFIX)
     cast_dtype = get_cast_dtype(precision)
 
-    print("model name:", model_name)
-    
     if model_name.startswith("HTSAT") or model_name.startswith("whisper"):
         model_cfg = get_model_config(model_name)
         model = CLAP(**model_cfg, cast_dtype=cast_dtype)
@@ -331,10 +329,7 @@ def create_model(
 
     if model_name.startswith("HTSAT") and not pretrained:
         if pretrained_audio:
-            logging.info(pretrained_audio.split("/")[-1].startswith('HTSAT'))
             if pretrained_audio.split("/")[-1].startswith('HTSAT'):
-                
-                # if 'HTSAT_AudioSet_Saved' in pretrained_audio:
                 audio_ckpt = torch.load(pretrained_audio, map_location='cpu')
                 audio_ckpt = audio_ckpt['state_dict']
                 keys = list(audio_ckpt.keys())
@@ -342,22 +337,14 @@ def create_model(
                     if key.startswith('sed_model'):
                         v = audio_ckpt.pop(key)
                         audio_ckpt[key.replace("sed_model.", "audio.")] = v
-                # else:  # checkpoint trained via HTSAT codebase
-                #     audio_ckpt = torch.load(pretrained_audio, map_location='cpu')
-                #     audio_ckpt = audio_ckpt['state_dict']
-                #     keys = list(audio_ckpt.keys())
-                #     for key in keys:
-                #         if key.startswith('sed_model'):
-                #             v = audio_ckpt.pop(key)
-                #             audio_ckpt['audio_branch.' + key[10:]] = v
             else:
-                raise f'this audio encoder pretrained checkpoint is not support'
+                raise ValueError(f'Unsupported audio encoder pretrained checkpoint: {pretrained_audio}')
 
-        model.load_state_dict(audio_ckpt, strict=False)
-        logging.info(f"Loading pretrained {pretrained_audio.split('/')[-1]} weights ({pretrained_audio}).")
-        param_names = [n for n, p in model.named_parameters()]
-        for n in param_names:
-            print(n, "\t", "Loaded" if n in audio_ckpt else "Unloaded")
+            model.load_state_dict(audio_ckpt, strict=False)
+            logging.info(f"Loading pretrained {pretrained_audio.split('/')[-1]} weights ({pretrained_audio}).")
+            param_names = [n for n, p in model.named_parameters()]
+            for n in param_names:
+                logging.debug(f"{n}\t{'Loaded' if n in audio_ckpt else 'Unloaded'}")
 
     if output_dict and hasattr(model, "output_dict"):
         model.output_dict = True
@@ -366,9 +353,9 @@ def create_model(
         model = torch.jit.script(model)
 
     # set image preprocessing configuration in model attributes for convenience
-    if getattr(model.audio, 'image_size', None) is not None:
+    if hasattr(model, 'visual') and getattr(model.visual, 'image_size', None) is not None:
         # use image_size set on model creation (via config or force_image_size arg)
-        force_preprocess_cfg['size'] = model.audio.image_size
+        force_preprocess_cfg['size'] = model.visual.image_size
     set_model_preprocess_cfg(model, merge_preprocess_dict(preprocess_cfg, force_preprocess_cfg))
 
     return model
